@@ -3,126 +3,104 @@
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/sys/util.h>
 #include <zephyr/sys/printk.h>
+#include <inttypes.h>
 
-#define LED0_NODE DT_ALIAS(led0)
-static const struct gpio_dt_spec led0 = GPIO_DT_SPEC_GET(LED0_NODE, gpios);
+/* Definições para o tempo do timer */
+#define TIMER_INTERVAL_MS 5000
 
-#define LED1_NODE DT_ALIAS(led1)
-static const struct gpio_dt_spec led1 = GPIO_DT_SPEC_GET(LED1_NODE, gpios);
+/* Configuração do botão */
+#define SW0_NODE DT_ALIAS(sw0)
+static const struct gpio_dt_spec button = GPIO_DT_SPEC_GET_OR(SW0_NODE, gpios, {0});
+static struct gpio_callback button_cb_data;
 
-#define LED2_NODE DT_ALIAS(led2)
-static const struct gpio_dt_spec led2 = GPIO_DT_SPEC_GET(LED2_NODE, gpios);
+/* Flags para rastrear as condições */
+int mutex1 = -1;
+int mutex2 = -1;
 
-#define BUTTON_NODE DT_ALIAS(sw0)
-static const struct gpio_dt_spec button = GPIO_DT_SPEC_GET(BUTTON_NODE, gpios);
+/* Define os Mutexes e os inicia */
+K_MUTEX_DEFINE(my_mutex1);
+K_MUTEX_DEFINE(my_mutex2);
 
-K_MUTEX_DEFINE(timer_mutex);
-K_MUTEX_DEFINE(button_mutex);
-
-#define LED0_PIN led0.pin
-#define LED1_PIN led1.pin
-#define LED2_PIN led2.pin
-
-void blink_led(void)
-{
-    int ret;
-
-    if (!device_is_ready(led0.port)) {
-        printk("Dispositivo GPIO do LED principal não está pronto\n");
-        return;
+/* Função Mutexes */
+void mutexTravado (){
+    if (mutex1 == 0 && mutex2 == 0){
+        printk("Ambos Travados\n");
     }
-
-    ret = gpio_pin_configure(led0.port, LED0_PIN, GPIO_OUTPUT_ACTIVE);
-    if (ret < 0) {
-        printk("Falha ao configurar o pino %d\n", LED0_PIN);
-        return;
-    }
-
-    while (1) {
-        k_mutex_lock(&timer_mutex, K_FOREVER);
-
-        gpio_pin_set(led0.port, LED0_PIN, 1);
-        printk("LED0 ON\n");
-        k_sleep(K_SECONDS(1));
-
-        gpio_pin_set(led0.port, LED0_PIN, 0);
-        printk("LED0 OFF\n");
-
-        k_mutex_unlock(&timer_mutex);
-
-        k_sleep(K_SECONDS(4));
+    else{
+        printk("NAO ESTAO ambos travados\n");
     }
 }
 
-void button_led(void)
+/* Callback do timer 1 e 2 */
+void timer_expiry_callback1(struct k_timer *dummy)
 {
-    int ret;
+    /* Trava o Mutex 1 */
+    mutex1 = k_mutex_lock(&my_mutex1, K_FOREVER);
+    printk("Mutex 1 Travado\n");
+    mutexTravado();
+}
+void timer_expiry_callback2(struct k_timer *dummy)
+{
+    /* Destrava o Mutex 1 */
+    k_mutex_unlock(&my_mutex1);
+    printk("Mutex 1 Destravado\n");
+}
 
-    if (!device_is_ready(led1.port) || !device_is_ready(button.port)) {
-        printk("Dispositivo GPIO do LED ou botão não está pronto\n");
-        return;
+/* Callback do botão */
+void button_pressed(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
+{
+    if (gpio_pin_get(dev, button.pin)){
+    /* Trava o Mutex 2 */
+    mutex2 = k_mutex_lock(&my_mutex2, K_FOREVER);
+    printk("Mutex 2 Travado\n");
     }
-
-    ret = gpio_pin_configure(led1.port, LED1_PIN, GPIO_OUTPUT_INACTIVE);
-    if (ret < 0) {
-        printk("Falha ao configurar o pino %d\n", LED1_PIN);
-        return;
-    }
-
-    ret = gpio_pin_configure(button.port, button.pin, GPIO_INPUT | GPIO_PULL_UP);
-    if (ret < 0) {
-        printk("Falha ao configurar o pino do botão\n");
-        return;
-    }
-
-    while (1) {
-        if (gpio_pin_get(button.port, button.pin) == 0) {
-            k_mutex_lock(&button_mutex, K_FOREVER);
-            gpio_pin_set(led1.port, LED1_PIN, 1);
-            printk("LED1 ON\n");
-        } else {
-            gpio_pin_set(led1.port, LED1_PIN, 0);
-            printk("LED1 OFF\n");
-            k_mutex_unlock(&button_mutex);
-        }
-        k_sleep(K_MSEC(100));
+    else{
+    /* Destrava o Mutex 2 */
+    k_mutex_unlock(&my_mutex2);
+    printk("Mutex 2 Destravado\n");
     }
 }
 
-void third_led_control(void)
+/* Define o timer */
+K_TIMER_DEFINE(my_timer1, timer_expiry_callback1, NULL);
+K_TIMER_DEFINE(my_timer2, timer_expiry_callback2, NULL);
+
+/* Função principal */
+int main(void)
 {
     int ret;
 
-    if (!device_is_ready(led2.port)) {
-        printk("Dispositivo GPIO do LED3 não está pronto\n");
-        return;
+    /* Configuração do botão */
+    if (!gpio_is_ready_dt(&button)) {
+        printk("Erro: Botão não está pronto\n");
+        return -1;
     }
 
-    ret = gpio_pin_configure(led2.port, LED2_PIN, GPIO_OUTPUT_INACTIVE);
-    if (ret < 0) {
-        printk("Falha ao configurar o pino %d\n", LED2_PIN);
-        return;
+    ret = gpio_pin_configure_dt(&button, GPIO_INPUT);
+    if (ret != 0) {
+        printk("Erro ao configurar o botão\n");
+        return -1;
     }
 
+    ret = gpio_pin_interrupt_configure_dt(&button, GPIO_INT_EDGE_BOTH);
+    if (ret != 0) {
+        printk("Erro ao configurar a interrupção do botão [borda de subída e descida]\n");
+        return -1;
+    }
+
+    gpio_init_callback(&button_cb_data, button_pressed, BIT(button.pin));
+    gpio_add_callback(button.port, &button_cb_data);
+
+    /* Inicia o timer */
+    k_timer_start(&my_timer1, K_MSEC(TIMER_INTERVAL_MS), K_MSEC(TIMER_INTERVAL_MS));
+    k_timer_start(&my_timer2, K_MSEC(TIMER_INTERVAL_MS), K_MSEC(TIMER_INTERVAL_MS));
+
+    printk("Sistema inicializado. Timer ativo!\n");
+
+    /* Loop infinito */
     while (1) {
-        if (k_mutex_lock(&timer_mutex, K_NO_WAIT) == 0) {
-            k_mutex_unlock(&timer_mutex);
-        } else if (k_mutex_lock(&button_mutex, K_NO_WAIT) == 0) {
-            k_mutex_unlock(&button_mutex);
-        } else {
-            gpio_pin_set(led2.port, LED2_PIN, 1);
-            printk("LED2 ON - Ambos os mutexes bloqueados\n");
-            k_sleep(K_MSEC(100));
-            continue;
-        }
-
-        gpio_pin_set(led2.port, LED2_PIN, 0);
-        printk("LED2 OFF - Condição não satisfeita\n");
-
-        k_sleep(K_MSEC(100));
+        k_msleep(1000); // Reduz o uso da CPU enquanto espera por eventos
     }
-}
 
-K_THREAD_DEFINE(blink_led_id, 1024, blink_led, NULL, NULL, NULL, 7, 0, 0);
-K_THREAD_DEFINE(button_led_id, 1024, button_led, NULL, NULL, NULL, 7, 0, 0);
-K_THREAD_DEFINE(third_led_id, 1024, third_led_control, NULL, NULL, NULL, 7, 0, 0);
+    return 0;
+}
